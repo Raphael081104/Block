@@ -1,14 +1,32 @@
+import { ethers } from 'ethers';
 import { generate as cpuGenerate } from './vanity/generator-cpu.js';
 import { deriveAddress, toChecksumAddress } from './vanity/utils.js';
 import { storeVanityKey } from './tx/vault.js';
 import { sendTx } from './tx/sender.js';
 import { getTiming } from './timing.js';
 import { saveTarget, saveVanity, addVanityTxHash, incrementDailyStat } from './lib/db.js';
+import { notifyNewVanity } from './lib/pubsub.js';
 import { CHAINS } from './config/chains.js';
 
 const MAIN_WALLET = process.env.MAIN_WALLET;
+const HOT_WALLET_KEY = process.env.HOT_WALLET_KEY; // funds vanity wallets with gas
 const PREFIX_LEN = parseInt(process.env.VANITY_PREFIX || '4', 10);
 const SUFFIX_LEN = parseInt(process.env.VANITY_SUFFIX || '4', 10);
+
+// Global concurrency limit for vanity generation
+let activeVanityWorkers = 0;
+const MAX_VANITY_CONCURRENCY = 2; // max simultaneous vanity gens
+
+async function waitForSlot() {
+  while (activeVanityWorkers >= MAX_VANITY_CONCURRENCY) {
+    await sleep(1000);
+  }
+  activeVanityWorkers++;
+}
+
+function releaseSlot() {
+  activeVanityWorkers = Math.max(0, activeVanityWorkers - 1);
+}
 
 function log(msg) {
   console.log(`[${new Date().toISOString().slice(11, 19)}][PIPELINE] ${msg}`);
@@ -43,11 +61,16 @@ export async function runVanityPipeline({ targetAddress, chainKey, score, native
   });
   await incrementDailyStat('scored', 1);
 
-  // ── Step 1: Vanity Gen ────────────────────────────
-  log(`[1/3] Generating vanity for ${prefix}...${suffix} (score: ${score})`);
+  // ── Step 1: Vanity Gen (with concurrency limit) ───
+  log(`[1/4] Waiting for vanity slot (active: ${activeVanityWorkers}/${MAX_VANITY_CONCURRENCY})...`);
+  await waitForSlot();
+
+  log(`[1/4] Generating vanity for ${prefix}...${suffix} (score: ${score})`);
 
   const startGen = Date.now();
-  const vanityResult = await cpuGenerate({
+  let vanityResult;
+  try {
+    vanityResult = await cpuGenerate({
     prefix,
     suffix,
     onProgress: (attempts, speed) => {
@@ -64,10 +87,14 @@ export async function runVanityPipeline({ targetAddress, chainKey, score, native
 
   const checksumAddr = toChecksumAddress(vanityResult.address);
   const genTime = ((Date.now() - startGen) / 1000).toFixed(1);
-  log(`\n  [1/3] Vanity found: ${checksumAddr} (${genTime}s, ${vanityResult.attempts.toLocaleString()} attempts)`);
+  log(`\n  [1/4] Vanity found: ${checksumAddr} (${genTime}s, ${vanityResult.attempts.toLocaleString()} attempts)`);
+
+  } finally {
+    releaseSlot();
+  }
 
   // ── Step 2: Store in Redis (vault + vanity table) ─
-  log(`[2/3] Storing encrypted key in Redis...`);
+  log(`[2/4] Storing encrypted key in Redis...`);
 
   await storeVanityKey({
     targetAddress,
@@ -86,11 +113,37 @@ export async function runVanityPipeline({ targetAddress, chainKey, score, native
     txHashes: [],
   });
 
-  log(`[2/3] Key stored (vault + vanity:${checksumAddr.slice(0, 10)}...)`);
+  // Notify hit detector immediately (no 30s blind window)
+  await notifyNewVanity(checksumAddr);
 
-  // ── Step 3: Timing + TX Sequence ───────────────────
+  log(`[2/4] Key stored (vault + vanity:${checksumAddr.slice(0, 10)}...)`);
+
+  // ── Step 3: Fund vanity wallet with gas ───────────
+  if (!HOT_WALLET_KEY) {
+    log(`[3/4] WARNING: HOT_WALLET_KEY not set — cannot fund vanity wallet`);
+  } else {
+    log(`[3/4] Funding vanity wallet with gas...`);
+    try {
+      const provider = new ethers.JsonRpcProvider(chain.rpcs[0]);
+      const hotWallet = new ethers.Wallet(HOT_WALLET_KEY, provider);
+
+      // Fund: 0.002 native (0.001 x2 sends + gas buffer)
+      const fundAmount = ethers.parseUnits('0.003', chain.nativeDecimals);
+      const fundTx = await hotWallet.sendTransaction({
+        to: checksumAddr,
+        value: fundAmount,
+      });
+      await fundTx.wait();
+      log(`[3/4] Funded ${checksumAddr} with 0.003 ${chain.nativeSymbol} (${fundTx.hash})`);
+    } catch (err) {
+      log(`[3/4] FUNDING FAILED: ${err.message} — aborting TX sequence`);
+      return;
+    }
+  }
+
+  // ── Step 4: Timing + TX Sequence ───────────────────
   const timing = await getTiming(score, chainKey);
-  log(`[3/3] Timing: ${timing.reason}`);
+  log(`[4/4] Timing: ${timing.reason}`);
   log(`  TX #1 in ${timing.delaySec1}s, TX #2 in ${timing.delaySec2}s`);
 
   const txSteps = [

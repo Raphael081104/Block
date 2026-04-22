@@ -40,23 +40,18 @@ function decrypt(encryptedData, password) {
 
 /**
  * Store vanity keypair in Redis (encrypted)
- * @param {object} opts
- * @param {string} opts.targetAddress - the original "poto" address
- * @param {string} opts.vanityAddress - the generated lookalike address
- * @param {string} opts.privateKey - private key to encrypt & store
- * @param {string} opts.prefix - matched prefix
- * @param {string} opts.suffix - matched suffix
- * @param {string} [opts.password] - encryption password (default: VAULT_PASSWORD env)
+ * Keyed by VANITY address (not target) to support same whale multiple times
  */
 export async function storeVanityKey({ targetAddress, vanityAddress, privateKey, prefix, suffix, password }) {
   const pwd = password || process.env.VAULT_PASSWORD;
   if (!pwd) throw new Error('VAULT_PASSWORD env required to encrypt keys');
 
   const { encrypted, iv, authTag } = encrypt(privateKey, pwd);
-  const key = VAULT_PREFIX + targetAddress.toLowerCase();
+  const vanityLower = vanityAddress.toLowerCase();
+  const key = VAULT_PREFIX + vanityLower;
 
   await redis.hset(key, {
-    vanityAddress,
+    vanityAddress: vanityLower,
     targetAddress: targetAddress.toLowerCase(),
     prefix,
     suffix,
@@ -66,20 +61,24 @@ export async function storeVanityKey({ targetAddress, vanityAddress, privateKey,
     createdAt: new Date().toISOString(),
   });
 
-  // Index for lookup
-  await redis.sadd('vault:vanity:all', targetAddress.toLowerCase());
+  // Index: vanity address set + reverse lookup
+  await redis.sadd('vault:vanity:all', vanityLower);
+  await redis.set(`vault:reverse:${vanityLower}`, vanityLower);
+
+  // Expire after 7 days
+  await redis.expire(key, 7 * 24 * 60 * 60);
 
   return { vanityAddress, stored: true };
 }
 
 /**
- * Retrieve and decrypt a vanity key from Redis
+ * Retrieve and decrypt a vanity key by vanity address
  */
-export async function getVanityKey(targetAddress, password) {
+export async function getVanityKey(vanityAddress, password) {
   const pwd = password || process.env.VAULT_PASSWORD;
   if (!pwd) throw new Error('VAULT_PASSWORD env required to decrypt keys');
 
-  const key = VAULT_PREFIX + targetAddress.toLowerCase();
+  const key = VAULT_PREFIX + vanityAddress.toLowerCase();
   const data = await redis.hgetall(key);
   if (!data || !data.encrypted) return null;
 
@@ -99,11 +98,11 @@ export async function getVanityKey(targetAddress, password) {
  * List all stored vanity addresses (without keys)
  */
 export async function listVanityAddresses() {
-  const targets = await redis.smembers('vault:vanity:all');
+  const vanities = await redis.smembers('vault:vanity:all');
   const results = [];
-  for (const target of targets) {
-    const data = await redis.hgetall(VAULT_PREFIX + target);
-    if (data) {
+  for (const vanity of vanities) {
+    const data = await redis.hgetall(VAULT_PREFIX + vanity);
+    if (data && data.vanityAddress) {
       results.push({
         targetAddress: data.targetAddress,
         vanityAddress: data.vanityAddress,

