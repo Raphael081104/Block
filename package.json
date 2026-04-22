@@ -5,15 +5,16 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "export": "node src/export.js"
+    "export": "node src/export.js",
+    "vanity": "node src/vanity/index.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
+    "ethereum-cryptography": "^3.2.0",
     "ethers": "^6.13.4",
     "ioredis": "^5.4.2",
     "node-telegram-bot-api": "^0.66.0"
   },
-  "devDependencies": {},
   "engines": {
     "node": ">=22.0.0"
   }
