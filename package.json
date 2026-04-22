@@ -8,7 +8,8 @@
     "export": "node src/export.js",
     "vanity": "node src/vanity/index.js",
     "tx": "node src/tx/index.js",
-    "hit": "node src/hit/index.js"
+    "hit": "node src/hit/index.js",
+    "bot": "node src/bot.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

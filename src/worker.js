@@ -41,14 +41,25 @@ async function processBlock(blockNumber, provider) {
     const rpcUrl = getRpc();
     let matches = 0;
 
-    // Filtre par batch
+    // Filtre par batch + notify parent on match
     for (let i = 0; i < addresses.length; i += BATCH_SIZE) {
       const batch = addresses.slice(i, i + BATCH_SIZE);
       const results = await Promise.allSettled(
         batch.map((addr) => filterAndScore(addr, chain, chainConfig, dexUsers, rpcUrl, 1, 20, decoded))
       );
-      for (const r of results) {
-        if (r.status === "fulfilled" && r.value) matches++;
+      for (let j = 0; j < results.length; j++) {
+        const r = results[j];
+        if (r.status === "fulfilled" && r.value) {
+          matches++;
+          parentPort?.postMessage({
+            type: "match_found",
+            address: batch[j],
+            chain,
+            score: r.value.score,
+            nativeBalance: r.value.nativeBalance,
+            nativeSymbol: r.value.nativeSymbol,
+          });
+        }
       }
     }
 
