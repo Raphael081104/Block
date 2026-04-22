@@ -218,6 +218,7 @@ export const CHAINS = {
 };
 
 export const FILTER_CONFIG = {
+  minBalanceUsd: 10_000,   // Filtre 1: balance sender > $10K (native + stables)
   minNative: 0.05,
   minStablecoins: 500,
   minTxCount: 20,

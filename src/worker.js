@@ -2,6 +2,7 @@ import { parentPort, workerData } from "node:worker_threads";
 import { WebSocketProvider } from "ethers";
 import { decodeBlock, extractAddresses } from "./lib/decoder.js";
 import { filterAndScore } from "./scoring/filters.js";
+import { trackTx } from "./lib/redis.js";
 
 const { chain, chainConfig } = workerData;
 const BATCH_SIZE = 10;
@@ -30,6 +31,11 @@ async function processBlock(blockNumber, provider) {
     const decoded = decodeBlock(block, chainConfig);
     const { addresses, dexUsers } = extractAddresses(decoded);
 
+    // Track toutes les TX dans Redis (pour filtre 2: test TX + filtre 3: récurrence)
+    for (const tx of decoded) {
+      await trackTx(chain, tx.from, tx.to, tx.value);
+    }
+
     log(`Block ${blockNumber} | ${decoded.length} txs | ${addresses.length} addrs | ${dexUsers.size} dex`);
 
     const rpcUrl = getRpc();
@@ -39,7 +45,7 @@ async function processBlock(blockNumber, provider) {
     for (let i = 0; i < addresses.length; i += BATCH_SIZE) {
       const batch = addresses.slice(i, i + BATCH_SIZE);
       const results = await Promise.allSettled(
-        batch.map((addr) => filterAndScore(addr, chain, chainConfig, dexUsers, rpcUrl))
+        batch.map((addr) => filterAndScore(addr, chain, chainConfig, dexUsers, rpcUrl, 1, 20, decoded))
       );
       for (const r of results) {
         if (r.status === "fulfilled" && r.value) matches++;

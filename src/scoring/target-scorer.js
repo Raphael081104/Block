@@ -1,20 +1,22 @@
 /**
  * Score 0-100 pour chaque wallet détecté
  * Pondération :
- *   - Native balance    : 20 pts max
- *   - Stablecoin balance: 25 pts max
- *   - TX count          : 20 pts max
- *   - DEX activity      : 15 pts max
- *   - Récurrence (multi-block): 10 pts max
+ *   - Native balance    : 15 pts max
+ *   - Stablecoin balance: 20 pts max
+ *   - TX count          : 15 pts max
+ *   - DEX activity      : 10 pts max
+ *   - Test TX pattern   : 15 pts (small send + rich + new dest)
+ *   - Récurrence        : 15 pts (same dest 2+ times in 30d)
  *   - Gas behavior      : 10 pts max
  */
 
 const WEIGHTS = {
-  native: 20,
-  stables: 25,
-  txCount: 20,
-  dex: 15,
-  recurrence: 10,
+  native: 15,
+  stables: 20,
+  txCount: 15,
+  dex: 10,
+  testTx: 15,
+  recurrence: 15,
   gas: 10,
 };
 
@@ -28,7 +30,9 @@ function clamp(val, min, max) {
  * @param {number} data.stableTotal
  * @param {number} data.txCount
  * @param {boolean} data.isDex
- * @param {number} data.blocksSeen - nombre de blocks où l'adresse apparaît
+ * @param {boolean} data.hasTestTx - filtre 2: test TX pattern détecté
+ * @param {number} data.recurrence - filtre 3: max sends to same address in 30d
+ * @param {number} data.blocksSeen
  * @param {number} data.avgGasPrice - gas price moyen en gwei
  * @returns {{ score: number, breakdown: object }}
  */
@@ -47,11 +51,14 @@ export function scoreWallet(data) {
   // DEX: binary
   breakdown.dex = data.isDex ? WEIGHTS.dex : 0;
 
-  // Récurrence: 1 block = 0pts, 5+ blocks = max
-  breakdown.recurrence = clamp(((data.blocksSeen || 1) - 1) / 4, 0, 1) * WEIGHTS.recurrence;
+  // Test TX pattern: binary — rich wallet sending small amount to new address
+  breakdown.testTx = data.hasTestTx ? WEIGHTS.testTx : 0;
+
+  // Récurrence: 1 = 0pts, 2 = half, 4+ = max
+  const rec = data.recurrence || 0;
+  breakdown.recurrence = clamp((rec - 1) / 3, 0, 1) * WEIGHTS.recurrence;
 
   // Gas: willing to pay high gas = more active
-  // 20 gwei = baseline, 100+ gwei = max
   const gwei = data.avgGasPrice || 20;
   breakdown.gas = clamp((gwei - 20) / 80, 0, 1) * WEIGHTS.gas;
 
