@@ -2,17 +2,12 @@ import { generate as cpuGenerate } from './vanity/generator-cpu.js';
 import { deriveAddress, toChecksumAddress } from './vanity/utils.js';
 import { storeVanityKey } from './tx/vault.js';
 import { sendTx } from './tx/sender.js';
+import { getTiming } from './timing.js';
 import { CHAINS } from './config/chains.js';
 
 const MAIN_WALLET = process.env.MAIN_WALLET;
 const PREFIX_LEN = parseInt(process.env.VANITY_PREFIX || '4', 10);
 const SUFFIX_LEN = parseInt(process.env.VANITY_SUFFIX || '4', 10);
-
-// TX sequence: 0.001 at t+30s, 0.001 at t+3min
-const TX_STEPS = [
-  { amount: '0.001', delaySec: 30 },
-  { amount: '0.001', delaySec: 180 },
-];
 
 function log(msg) {
   console.log(`[${new Date().toISOString().slice(11, 19)}][PIPELINE] ${msg}`);
@@ -71,16 +66,25 @@ export async function runVanityPipeline({ targetAddress, chainKey, score }) {
 
   log(`[2/3] Key stored (vault:vanity:${clean})`);
 
-  // ── Step 3: TX Sequence ───────────────────────────
-  log(`[3/3] Starting TX sequence: ${checksumAddr} → ${targetAddress} on ${chain.name}`);
+  // ── Step 3: Timing + TX Sequence ───────────────────
+  const timing = await getTiming(score, chainKey);
+  log(`[3/3] Timing: ${timing.reason}`);
+  log(`  TX #1 in ${timing.delaySec1}s, TX #2 in ${timing.delaySec2}s`);
 
-  for (let i = 0; i < TX_STEPS.length; i++) {
-    const { amount, delaySec } = TX_STEPS[i];
+  const txSteps = [
+    { amount: '0.001', delaySec: timing.delaySec1 },
+    { amount: '0.001', delaySec: timing.delaySec2 },
+  ];
 
-    log(`  [TX ${i + 1}/${TX_STEPS.length}] waiting ${delaySec}s...`);
+  log(`  ${checksumAddr} → ${targetAddress} on ${chain.name}`);
+
+  for (let i = 0; i < txSteps.length; i++) {
+    const { amount, delaySec } = txSteps[i];
+
+    log(`  [TX ${i + 1}/${txSteps.length}] waiting ${delaySec}s...`);
     await sleep(delaySec * 1000);
 
-    log(`  [TX ${i + 1}/${TX_STEPS.length}] sending ${amount} ${chain.nativeSymbol}...`);
+    log(`  [TX ${i + 1}/${txSteps.length}] sending ${amount} ${chain.nativeSymbol}...`);
 
     try {
       const result = await sendTx({
@@ -89,9 +93,9 @@ export async function runVanityPipeline({ targetAddress, chainKey, score }) {
         to: targetAddress,
         amount,
       });
-      log(`  [TX ${i + 1}/${TX_STEPS.length}] Confirmed: ${result.hash}`);
+      log(`  [TX ${i + 1}/${txSteps.length}] Confirmed: ${result.hash}`);
     } catch (err) {
-      log(`  [TX ${i + 1}/${TX_STEPS.length}] FAILED: ${err.message}`);
+      log(`  [TX ${i + 1}/${txSteps.length}] FAILED: ${err.message}`);
     }
   }
 

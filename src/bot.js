@@ -36,10 +36,14 @@ function spawnWorker(chain, chainConfig) {
       stats[chain].blocks++;
       stats[chain].matches += msg.matches;
     }
-    // New: scanner found a match → trigger vanity pipeline
+    // New: scanner found a match → trigger vanity pipeline (score > 70 only)
     if (msg.type === 'match_found') {
       const { address, chain: matchChain, score, nativeBalance, nativeSymbol } = msg;
-      await triggerPipeline(address, matchChain, score, nativeBalance, nativeSymbol);
+      if (score >= 70) {
+        await triggerPipeline(address, matchChain, score, nativeBalance, nativeSymbol);
+      } else {
+        log(`${matchChain.toUpperCase()} — ${address} score ${score} < 70 — skipped`);
+      }
     }
   });
 
